@@ -1,4 +1,6 @@
 #include <Servo.h>
+// download at https://github.com/GreyGnome/PinChangeInt/archive/master.zip
+#include <PinChangeInt.h>
 
 //defines the servo object
 Servo ServoL;  //Servo fin stern left
@@ -13,11 +15,27 @@ Servo ServoU;  //Servo fin stern up
 #define ServoRpin 6 //Servo fin stern right
 #define ServoUpin 9 //Servo fin stern up
 
-           
+
 
 //variables for the maneuver calculations
-double Rotation;
-double Xaxis; 
+int Rotation;
+int Xaxis; 
+
+// interrupt stuff
+volatile uint8_t updateFlagsShared;
+
+volatile uint16_t vRotation;
+volatile uint16_t vXaxis;
+
+uint32_t ulRotationStart;
+uint32_t ulXaxisStart;
+
+#define ROTATION_FLAG 1
+#define XAXIS_FLAG 2
+#define ROLL_FLAG 4
+
+uint8_t updateChannel;
+
 
 
 int ServoLout = 90; //Servo fin stern left
@@ -56,44 +74,116 @@ void setup()
     readings_CH2[thisReading] = 0.0;
     readings_CH3[thisReading] = 0.0;
   }
+
+  PCintPort::attachInterrupt(CH2pin, calcRotation,CHANGE);
+  PCintPort::attachInterrupt(CH3pin, calcXaxis,CHANGE);
+
 } //setup end
 
 void loop()
 {
-  Rotation -= readings_CH2[index];
-  Xaxis -= readings_CH3[index];
+  static uint16_t vRotationIn;
+  static uint16_t vXaxisIn;
 
-  // values range from -500 to 500
-  int Rotation_tmp = -(((long)pulseIn(CH2pin, HIGH))-MIN_PWM); 
-  int Xaxis_tmp = (((long)pulseIn(CH3pin, HIGH))-MIN_PWM); 
-
-  Rotation += Rotation_tmp;
-  Xaxis += Xaxis_tmp;
-
-  readings_CH2[index] = Rotation_tmp;
-  readings_CH3[index] = Xaxis_tmp;
-  index = (index + 1) % NUMREADINGS;
-
-   /* Control Matrix for inverted Y fins
-   
-               | Rotation  |  Xaxis  |
-   ServoLeft   |    +      |    +    |
-   ServoRight  |    +      |    -    |
-   ServoUp     |    -      |   N/A   |     */
   
-  ServoLout = ((br(Rotation) / YCORRECTDIV) + cubic(br(Xaxis))); //calculation of maneuvers
-  ServoRout = ((br(Rotation) / YCORRECTDIV) - cubic(br(Xaxis)));
-  ServoUout = (-br(Rotation));
+  static uint8_t updateFlags;
 
-  ServoL.write(forServo(ServoLout));
-  ServoR.write(forServo(ServoRout));
-  ServoU.write(forServo(ServoUout));
+  if(updateFlagsShared)
+  {
+    noInterrupts(); 
+
+    
+    updateFlags = updateFlagsShared;
+    if(updateFlags & ROTATION_FLAG)
+    {
+      vRotationIn = vRotation;
+    }
+
+    if(updateFlags & XAXIS_FLAG)
+    {
+      vXaxisIn = vXaxis;
+    }
+
+    updateFlagsShared = 0;
+
+    interrupts(); 
+  }
+
+  if(updateFlags & ROTATION_FLAG) {
+    Rotation -= readings_CH2[index];
+    int Rotation_tmp = -(vRotationIn-MIN_PWM); 
+    Rotation += Rotation_tmp;
+
+    readings_CH2[index] = Rotation_tmp;
+
+    updateChannel |= ROTATION_FLAG;
+  }
+
+  if(updateFlags & XAXIS_FLAG) {
+    Xaxis -= readings_CH3[index];
+    int Xaxis_tmp = (vXaxisIn-MIN_PWM);
+    Xaxis += Xaxis_tmp;
+
+    readings_CH3[index] = Xaxis_tmp;
+
+    updateChannel |= XAXIS_FLAG;
+  }
+  
+  updateFlags = 0;
+
+  if((updateChannel & ROTATION_FLAG) && (updateChannel & XAXIS_FLAG)) {
+    
+    updateChannel = 0;
+    
+    index = (index + 1) % NUMREADINGS;
+
+    /* Control Matrix for inverted Y fins
+     
+     | Rotation  |  Xaxis  |
+     ServoLeft   |    +      |    +    |
+     ServoRight  |    +      |    -    |
+     ServoUp     |    -      |   N/A   |     */
+
+    ServoLout = ((br(Rotation) / YCORRECTDIV) + cubic(br(Xaxis))); //calculation of maneuvers
+    ServoRout = ((br(Rotation) / YCORRECTDIV) - cubic(br(Xaxis)));
+    ServoUout = (-br(Rotation));
+
+    ServoL.write(forServo(ServoLout));
+    ServoR.write(forServo(ServoRout));
+    ServoU.write(forServo(ServoUout));
+  }
 
 } //loop end
 
+
+// interrupt routines
+void calcRotation() {
+  if(digitalRead(CH2pin) == HIGH)
+  { 
+    ulRotationStart = micros();
+  }
+  else
+  { 
+    vRotation = (uint16_t)(micros() - ulRotationStart);
+    updateFlagsShared |= ROTATION_FLAG;
+  }
+}
+
+void calcXaxis() {
+  if(digitalRead(CH3pin) == HIGH)
+  { 
+    ulXaxisStart = micros();
+  }
+  else
+  { 
+    vXaxis = (uint16_t)(micros() - ulXaxisStart);
+    updateFlagsShared |= XAXIS_FLAG;
+  }
+}
+
 // cubic function to fit into [MIN_DEG, MAX_DEG]
 inline int cubic(double in) {
- return (in * in * in) / MAX_DEG_SQUARE;
+  return (in * in * in) / MAX_DEG_SQUARE;
 }
 // by readings 
 inline int br(double in) {
@@ -110,3 +200,8 @@ inline long forServo(int s) {
   } //setÂ´s -MAX_DEG as minimum for the servos
   return map(s,-MAX_DEG,MAX_DEG,MIN_A,MAX_A); //maps the values from -90 to 90 to the necessary output 10 to 170
 }
+
+
+
+
+
